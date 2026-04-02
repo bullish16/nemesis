@@ -3,7 +3,7 @@ import "dotenv/config";
 
 // ═══════════════════════════════════════════════════════════
 // NEMESIS.TRADE TESTNET BOT — ETH Sepolia
-// Swap, Open Short, Add Liquidity, Close All Positions
+// Swap, Open Long, Open Short, Add/Remove Liquidity, Close All
 // ═══════════════════════════════════════════════════════════
 
 const RPC_URL = process.env.RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com";
@@ -51,6 +51,17 @@ const SHORT_CONFIG = {
   "UNI-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
 };
 
+// ── Long Position Config ──
+// For LONG: collateral = the token you're going long on (or the base token)
+// USDC-WETH pool: long WETH → collateral = WETH (token1)
+// WETH-DAI pool:  long WETH → collateral = WETH (token0)
+// UNI-WETH pool:  long ETH  → collateral = WETH (token1)
+const LONG_CONFIG = {
+  "USDC-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
+  "WETH-DAI": { collateral: WETH, symbol: "WETH", decimals: 18 },
+  "UNI-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
+};
+
 // ── Subgraph ──
 const SUBGRAPH_URL =
   "https://api.goldsky.com/api/public/project_cmma0sxdrnwdx01ym126h3z8q/subgraphs/nemesis-eth-sepolia/prod/gn";
@@ -69,6 +80,8 @@ const ROUTER_ABI = [
   "function addLiquidityETH(address token, uint amountTokenDesired, uint amountTokenMin, uint amountETHMin, address to, uint deadline) payable returns (uint amountToken, uint amountETH, uint liquidity)",
   "function addLiquidity(address tokenA, address tokenB, uint amountADesired, uint amountBDesired, uint amountAMin, uint amountBMin, address to, uint deadline) returns (uint amountA, uint amountB, uint liquidity)",
   "function getAmountsOut(uint amountIn, address[] path) view returns (uint[] amounts)",
+  "function removeLiquidity(address tokenA, address tokenB, uint liquidity, uint amountAMin, uint amountBMin, address to, uint deadline) returns (uint amountA, uint amountB)",
+  "function removeLiquidityETH(address token, uint liquidity, uint amountTokenMin, uint amountETHMin, address to, uint deadline) returns (uint amountToken, uint amountETH)",
 ];
 
 const FACTORY_ABI = [
@@ -304,6 +317,94 @@ async function openShort(poolKey, amountETHForCollateral, repeat) {
 }
 
 // ═══════════════════════════════════════════
+// STEP 2b: OPEN LONG positions
+// ═══════════════════════════════════════════
+async function openLong(poolKey, amountETH, repeat) {
+  const managerAddr = MANAGERS[poolKey];
+  const config = LONG_CONFIG[poolKey];
+
+  console.log(`\n📈 OPEN LONG on ${poolKey} (${repeat}x)`);
+  console.log(`   Collateral: ${fmtETH(amountETH)} ${config.symbol}`);
+  console.log(`   Manager: ${managerAddr}`);
+
+  const manager = new ethers.Contract(managerAddr, MANAGER_ABI, wallet);
+
+  // Check available liquidity
+  try {
+    const avail = await manager.getAvailableLiquidity();
+    console.log(`   Available liquidity: ${fmtETH(avail)}`);
+    if (avail === 0n) {
+      console.log(`   ⚠️ No liquidity available, skipping ${poolKey}`);
+      return;
+    }
+  } catch {}
+
+  // For LONG with WETH collateral: wrap ETH → WETH
+  const wethContract = new ethers.Contract(WETH, WETH_ABI, wallet);
+  const totalNeeded = amountETH * BigInt(repeat);
+  const wethBal = await wethContract.balanceOf(wallet.address);
+
+  if (wethBal < totalNeeded) {
+    const toWrap = totalNeeded - wethBal + ETH("0.0001");
+    console.log(`   💱 Wrapping ${fmtETH(toWrap)} ETH → WETH...`);
+    const wtx = await wethContract.deposit({ value: toWrap });
+    await waitTx(wtx, "Wrap ETH→WETH");
+  }
+
+  // Approve WETH to manager
+  await ensureApproval(WETH, managerAddr, totalNeeded, `WETH→${poolKey} manager`);
+
+  for (let i = 1; i <= repeat; i++) {
+    try {
+      const tx = await manager.openPosition(
+        true,       // isLong = true (LONG)
+        WETH,       // collateralToken = WETH
+        amountETH,  // collateralAmount
+        0n,         // borrowAmount (auto from leverage)
+        20n,        // leverageX10 = 2x
+        0n,         // amountOutMin
+        getDeadline(),
+        { gasLimit: 1000000n }
+      );
+      await waitTx(tx, `Long #${i} on ${poolKey}`);
+    } catch (err) {
+      console.error(`   ❌ Long #${i} on ${poolKey} failed:`, err.shortMessage || err.message);
+
+      // Retry with explicit borrowAmount
+      if (i === 1) {
+        console.log(`   🔄 Retrying with explicit borrowAmount...`);
+        try {
+          const tx = await manager.openPosition(
+            true, WETH, amountETH,
+            amountETH, // borrow = collateral for 2x
+            20n, 0n, getDeadline(),
+            { gasLimit: 1000000n }
+          );
+          await waitTx(tx, `Long #${i} on ${poolKey} (retry)`);
+          for (let j = i + 1; j <= repeat; j++) {
+            try {
+              const tx2 = await manager.openPosition(
+                true, WETH, amountETH,
+                amountETH, 20n, 0n, getDeadline(),
+                { gasLimit: 1000000n }
+              );
+              await waitTx(tx2, `Long #${j} on ${poolKey}`);
+            } catch (err2) {
+              console.error(`   ❌ Long #${j} on ${poolKey} failed:`, err2.shortMessage || err2.message);
+            }
+            await sleep(3000);
+          }
+          break;
+        } catch (err2) {
+          console.error(`   ❌ Retry also failed:`, err2.shortMessage || err2.message);
+        }
+      }
+    }
+    if (i < repeat) await sleep(3000);
+  }
+}
+
+// ═══════════════════════════════════════════
 // STEP 3: ADD LIQUIDITY
 // ═══════════════════════════════════════════
 async function addLiquidityETHPair(poolKey, tokenAddr, tokenSymbol, amountETH, repeat) {
@@ -418,6 +519,91 @@ async function addLiquidityTokenPair(poolKey, tokenA, symA, decA, tokenB, symB, 
 }
 
 // ═══════════════════════════════════════════
+// STEP 3b: REMOVE LIQUIDITY
+// ═══════════════════════════════════════════
+async function removeLiquidityETHPair(poolKey, tokenAddr, tokenSymbol) {
+  const poolAddr = POOLS[poolKey];
+  console.log(`\n🔥 REMOVE LIQUIDITY from ${poolKey}`);
+
+  // LP token = pool address itself
+  const lpToken = new ethers.Contract(poolAddr, ERC20_ABI, wallet);
+  const lpBalance = await lpToken.balanceOf(wallet.address);
+
+  if (lpBalance === 0n) {
+    console.log(`   ℹ️ No LP tokens for ${poolKey}, skipping`);
+    return;
+  }
+
+  console.log(`   LP balance: ${fmtETH(lpBalance)}`);
+
+  // Approve LP to router
+  await ensureApproval(poolAddr, ROUTER, lpBalance, `LP ${poolKey}→Router`);
+
+  try {
+    const tx = await router.removeLiquidityETH(
+      tokenAddr,
+      lpBalance,
+      0n, // amountTokenMin
+      0n, // amountETHMin
+      wallet.address,
+      getDeadline(),
+      { gasLimit: 500000n }
+    );
+    await waitTx(tx, `RemoveLiq from ${poolKey}`);
+  } catch (err) {
+    console.error(`   ❌ RemoveLiq ${poolKey} failed:`, err.shortMessage || err.message);
+
+    // Fallback: try removeLiquidity (non-ETH version with WETH)
+    console.log(`   🔄 Retrying with removeLiquidity (WETH)...`);
+    try {
+      const tx = await router.removeLiquidity(
+        tokenAddr, WETH,
+        lpBalance,
+        0n, 0n,
+        wallet.address,
+        getDeadline(),
+        { gasLimit: 500000n }
+      );
+      await waitTx(tx, `RemoveLiq from ${poolKey} (retry)`);
+    } catch (err2) {
+      console.error(`   ❌ Retry also failed:`, err2.shortMessage || err2.message);
+    }
+  }
+}
+
+async function removeLiquidityTokenPair(poolKey, tokenA, symA, tokenB, symB) {
+  const poolAddr = POOLS[poolKey];
+  console.log(`\n🔥 REMOVE LIQUIDITY from ${poolKey}`);
+
+  const lpToken = new ethers.Contract(poolAddr, ERC20_ABI, wallet);
+  const lpBalance = await lpToken.balanceOf(wallet.address);
+
+  if (lpBalance === 0n) {
+    console.log(`   ℹ️ No LP tokens for ${poolKey}, skipping`);
+    return;
+  }
+
+  console.log(`   LP balance: ${fmtETH(lpBalance)}`);
+
+  // Approve LP to router
+  await ensureApproval(poolAddr, ROUTER, lpBalance, `LP ${poolKey}→Router`);
+
+  try {
+    const tx = await router.removeLiquidity(
+      tokenA, tokenB,
+      lpBalance,
+      0n, 0n,
+      wallet.address,
+      getDeadline(),
+      { gasLimit: 500000n }
+    );
+    await waitTx(tx, `RemoveLiq from ${poolKey}`);
+  } catch (err) {
+    console.error(`   ❌ RemoveLiq ${poolKey} failed:`, err.shortMessage || err.message);
+  }
+}
+
+// ═══════════════════════════════════════════
 // STEP 4: CLOSE ALL POSITIONS
 // ═══════════════════════════════════════════
 async function closeAllPositions() {
@@ -499,7 +685,7 @@ async function closeAllPositions() {
 // ═══════════════════════════════════════════
 async function main() {
   console.log("═══════════════════════════════════════════");
-  console.log("  🏴 NEMESIS.TRADE TESTNET BOT v2");
+  console.log("  🏴 NEMESIS.TRADE TESTNET BOT v3");
   console.log("  Chain: ETH Sepolia (11155111)");
   console.log("═══════════════════════════════════════════");
 
@@ -518,9 +704,9 @@ async function main() {
     if (bal > 0n) console.log(`   ${sym}: ${ethers.formatUnits(bal, dec)}`);
   }
 
-  const minRequired = ETH("0.015");
+  const minRequired = ETH("0.025");
   if (balance < minRequired) {
-    console.error(`\n❌ Need at least ~0.015 ETH. Get from: https://www.alchemy.com/faucets/ethereum-sepolia`);
+    console.error(`\n❌ Need at least ~0.025 ETH. Get from: https://www.alchemy.com/faucets/ethereum-sepolia`);
     process.exit(1);
   }
 
@@ -529,7 +715,7 @@ async function main() {
 
   // ── STEP 1: SWAPS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  📊 STEP 1/4: SWAPS (15 transactions)");
+  console.log("  📊 STEP 1/6: SWAPS (15 transactions)");
   console.log("════════════════════════════════════════");
 
   await swapETHForToken(USDC, "USDC", AMOUNT_ETH, REPEAT);
@@ -538,25 +724,43 @@ async function main() {
 
   // ── STEP 2: OPEN SHORT POSITIONS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  📉 STEP 2/4: OPEN SHORT (15 positions)");
+  console.log("  📉 STEP 2/6: OPEN SHORT (15 positions)");
   console.log("════════════════════════════════════════");
 
   await openShort("USDC-WETH", AMOUNT_ETH, REPEAT);
   await openShort("WETH-DAI", AMOUNT_ETH, REPEAT);
   await openShort("UNI-WETH", AMOUNT_ETH, REPEAT);
 
-  // ── STEP 3: ADD LIQUIDITY ──
+  // ── STEP 3: OPEN LONG POSITIONS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  💧 STEP 3/4: ADD LIQUIDITY");
+  console.log("  📈 STEP 3/6: OPEN LONG (15 positions)");
+  console.log("════════════════════════════════════════");
+
+  await openLong("USDC-WETH", AMOUNT_ETH, REPEAT);
+  await openLong("WETH-DAI", AMOUNT_ETH, REPEAT);
+  await openLong("UNI-WETH", AMOUNT_ETH, REPEAT);
+
+  // ── STEP 4: ADD LIQUIDITY ──
+  console.log("\n\n════════════════════════════════════════");
+  console.log("  💧 STEP 4/6: ADD LIQUIDITY");
   console.log("════════════════════════════════════════");
 
   await addLiquidityETHPair("USDC-WETH", USDC, "USDC", AMOUNT_ETH, REPEAT);
   await addLiquidityETHPair("WETH-DAI", DAI, "DAI", AMOUNT_ETH, REPEAT);
   await addLiquidityTokenPair("USDC-DAI", USDC, "USDC", 6, DAI, "DAI", 18, "10", REPEAT);
 
-  // ── STEP 4: CLOSE ALL POSITIONS ──
+  // ── STEP 5: REMOVE LIQUIDITY ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  🔴 STEP 4/4: CLOSE ALL POSITIONS");
+  console.log("  🔥 STEP 5/6: REMOVE LIQUIDITY");
+  console.log("════════════════════════════════════════");
+
+  await removeLiquidityETHPair("UNI-WETH", UNI, "UNI");
+  await removeLiquidityETHPair("WETH-DAI", DAI, "DAI");
+  await removeLiquidityTokenPair("USDC-DAI", USDC, "USDC", DAI, "DAI");
+
+  // ── STEP 6: CLOSE ALL POSITIONS ──
+  console.log("\n\n════════════════════════════════════════");
+  console.log("  🔴 STEP 6/6: CLOSE ALL POSITIONS");
   console.log("════════════════════════════════════════");
 
   console.log("   ⏳ Waiting 30s for subgraph indexing...");

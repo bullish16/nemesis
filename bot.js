@@ -23,20 +23,32 @@ const USDC = "0x10279e6333f9d0ee103f4715b8aaea75be61464c";
 const DAI = "0xd67215fd6c0890493f34af3c5e4231ce98871fcb";
 const UNI = "0x7438ea86a89b7d53af5264fb3abae1172b046663";
 
-// ── Pool Addresses ──
+// ── Pool Addresses (from subgraph) ──
 const POOLS = {
-  "USDC-WETH": "0x42f052f625e28c802f04978909ece3f9d6e5e3a1",
-  "WETH-DAI": "0x0b6a0a69b7040b2281730cbae6060b3b1b2ed3a9",
-  "UNI-WETH": "0x84605fffe96a1961a144e695247029eb3a60c316",
-  "USDC-DAI": "0x337c9fecf78aad05f6ab742609bede3a4f3483cf",
+  "USDC-WETH": "0x42f052f625e28c802f04978909ece3f9d6e5e3a1", // token0=USDC, token1=WETH
+  "WETH-DAI": "0x0b6a0a69b7040b2281730cbae6060b3b1b2ed3a9",  // token0=WETH, token1=DAI
+  "UNI-WETH": "0x84605fffe96a1961a144e695247029eb3a60c316",  // token0=UNI,  token1=WETH
+  "USDC-DAI": "0x337c9fecf78aad05f6ab742609bede3a4f3483cf",  // token0=USDC, token1=DAI
 };
 
-// ── Vault Addresses (for liquidity) ──
-const VAULTS = {
-  "USDC-WETH": "0x93310a56147b1ea7486ab84f8d850fd0a216429b",
-  "WETH-DAI": "0xf467ec26cf1911a0ff87e3a6d36b3aec915506a9",
-  "UNI-WETH": "0xaf93c5b321757ca9f37992525c4889bceef76726",
+// ── Manager/Vault Addresses (from factory.getManager) ──
+// openPosition & closePosition are called on the MANAGER, not the pool!
+const MANAGERS = {
+  "USDC-WETH": "0x93310a56147b1eA7486Ab84F8D850FD0A216429B",
+  "WETH-DAI": "0xF467EC26cf1911A0Ff87E3A6D36b3aeC915506a9",
+  "UNI-WETH": "0xAF93c5b321757Ca9f37992525c4889Bceef76726",
   "USDC-DAI": "0x6c1581bd9eddec33c8e30e9f1c3d82def2716154",
+};
+
+// ── Short Position Config ──
+// For SHORT: collateral = the "counter" token (opposite of what you're shorting)
+// USDC-WETH pool: short WETH → collateral = USDC (token0)
+// WETH-DAI pool:  short WETH → collateral = DAI  (token1)
+// UNI-WETH pool:  short UNI  → collateral = WETH (token1)
+const SHORT_CONFIG = {
+  "USDC-WETH": { collateral: USDC, symbol: "USDC", decimals: 6 },
+  "WETH-DAI": { collateral: DAI, symbol: "DAI", decimals: 18 },
+  "UNI-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
 };
 
 // ── Subgraph ──
@@ -57,8 +69,6 @@ const ROUTER_ABI = [
   "function addLiquidityETH(address token, uint amountTokenDesired, uint amountTokenMin, uint amountETHMin, address to, uint deadline) payable returns (uint amountToken, uint amountETH, uint liquidity)",
   "function addLiquidity(address tokenA, address tokenB, uint amountADesired, uint amountBDesired, uint amountAMin, uint amountBMin, address to, uint deadline) returns (uint amountA, uint amountB, uint liquidity)",
   "function getAmountsOut(uint amountIn, address[] path) view returns (uint[] amounts)",
-  "function factory() view returns (address)",
-  "function WETH() view returns (address)",
 ];
 
 const FACTORY_ABI = [
@@ -66,20 +76,18 @@ const FACTORY_ABI = [
   "function getManager(address pool) view returns (address)",
 ];
 
-// Pool/NLP/Manager ABI (shared across pool and manager contracts)
-const POOL_ABI = [
+// Manager ABI (handles positions + vault/liquidity)
+const MANAGER_ABI = [
   "function openPosition(bool isLong, address collateralToken, uint256 collateralAmount, uint256 borrowAmount, uint256 leverageX10, uint256 amountOutMin, uint256 deadline) returns (uint256)",
   "function closePosition(uint256 positionId, uint256 amountOutMin, uint256 deadline)",
-  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
-  "function getPosition(uint256 positionId) view returns (tuple(bool isLong, address collateralToken, uint256 collateralAmount, uint256 borrowAmount, uint256 leverageX10))",
-  "function swapFeeBps() view returns (uint256)",
+  "function getAvailableLiquidity() view returns (uint256)",
+  "function totalAssets() view returns (uint256)",
+  "function totalBorrowed() view returns (uint256)",
+  "function LTV_BPS() view returns (uint256)",
   "function depositWithLiquidity(address tokenA, address tokenB, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address receiver, uint256 deadline) returns (uint256 shares)",
   "function withdrawWithLiquidity(uint256 shares, address tokenA, address tokenB, uint256 amountAMin, uint256 amountBMin, address receiver, address owner, uint256 deadline)",
   "function balanceOf(address account) view returns (uint256)",
-  "function totalAssets() view returns (uint256)",
-  "function totalSupply() view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
 ];
 
 const WETH_ABI = [
@@ -87,43 +95,51 @@ const WETH_ABI = [
   "function withdraw(uint wad)",
   "function balanceOf(address) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
 ];
 
 // ── Globals ──
 let provider, wallet, router, factory;
 
 // ── Helpers ──
-const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 1200); // 20 min
+const getDeadline = () => BigInt(Math.floor(Date.now() / 1000) + 1200);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ETH = (n) => ethers.parseEther(n.toString());
 const fmtETH = (n) => ethers.formatEther(n);
 const MAX_UINT = ethers.MaxUint256;
 
+let txCount = 0;
+
 async function waitTx(tx, label) {
-  console.log(`   ⏳ ${label} — tx: ${tx.hash}`);
+  txCount++;
+  console.log(`   ⏳ [TX #${txCount}] ${label} — ${tx.hash}`);
   const receipt = await tx.wait();
-  console.log(
-    `   ✅ ${label} — confirmed block ${receipt.blockNumber} (gas: ${receipt.gasUsed})`
-  );
+  console.log(`   ✅ [TX #${txCount}] ${label} — block ${receipt.blockNumber} (gas: ${receipt.gasUsed})`);
   return receipt;
 }
 
 async function ensureApproval(tokenAddr, spender, amount, label) {
   const token = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
   const current = await token.allowance(wallet.address, spender);
-  if (current >= amount) return;
+  if (current >= amount) {
+    console.log(`   🔓 ${label} already approved`);
+    return;
+  }
   console.log(`   🔓 Approving ${label}...`);
   const tx = await token.approve(spender, MAX_UINT);
   await waitTx(tx, `Approve ${label}`);
+}
+
+async function getTokenBalance(tokenAddr) {
+  const token = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
+  return await token.balanceOf(wallet.address);
 }
 
 // ═══════════════════════════════════════════
 // STEP 1: SWAP ETH → Tokens (via Router)
 // ═══════════════════════════════════════════
 async function swapETHForToken(tokenAddr, tokenSymbol, amountETH, repeat) {
-  console.log(
-    `\n🔄 SWAP: ${fmtETH(amountETH)} ETH → ${tokenSymbol} (${repeat}x)`
-  );
+  console.log(`\n🔄 SWAP: ${fmtETH(amountETH)} ETH → ${tokenSymbol} (${repeat}x)`);
   const path = [WETH, tokenAddr];
 
   for (let i = 1; i <= repeat; i++) {
@@ -132,66 +148,158 @@ async function swapETHForToken(tokenAddr, tokenSymbol, amountETH, repeat) {
         0n, // amountOutMin (testnet, accept any)
         path,
         wallet.address,
-        deadline(),
+        getDeadline(),
         { value: amountETH }
       );
       await waitTx(tx, `Swap #${i} ETH→${tokenSymbol}`);
     } catch (err) {
       console.error(`   ❌ Swap #${i} ETH→${tokenSymbol} failed:`, err.shortMessage || err.message);
     }
-    if (i < repeat) await sleep(2000);
+    if (i < repeat) await sleep(3000);
   }
 }
 
 // ═══════════════════════════════════════════
 // STEP 2: OPEN SHORT positions
 // ═══════════════════════════════════════════
-async function openShort(poolKey, collateralETH, repeat) {
-  const poolAddr = POOLS[poolKey];
-  console.log(
-    `\n📉 OPEN SHORT: ${fmtETH(collateralETH)} ETH on ${poolKey} (${repeat}x)`
-  );
+async function openShort(poolKey, amountETHForCollateral, repeat) {
+  const managerAddr = MANAGERS[poolKey];
+  const config = SHORT_CONFIG[poolKey];
 
-  // First, wrap ETH to WETH for collateral
-  const wethContract = new ethers.Contract(WETH, WETH_ABI, wallet);
-  const totalWETHNeeded = collateralETH * BigInt(repeat);
+  console.log(`\n📉 OPEN SHORT on ${poolKey} (${repeat}x)`);
+  console.log(`   Collateral token: ${config.symbol}`);
+  console.log(`   Manager: ${managerAddr}`);
 
-  // Check WETH balance
-  const wethBal = await wethContract.balanceOf(wallet.address);
-  if (wethBal < totalWETHNeeded) {
-    const toWrap = totalWETHNeeded - wethBal;
-    console.log(`   💱 Wrapping ${fmtETH(toWrap)} ETH → WETH...`);
-    const wtx = await wethContract.deposit({ value: toWrap });
-    await waitTx(wtx, "Wrap ETH→WETH");
+  const manager = new ethers.Contract(managerAddr, MANAGER_ABI, wallet);
+
+  // Check available liquidity
+  try {
+    const avail = await manager.getAvailableLiquidity();
+    console.log(`   Available liquidity: ${fmtETH(avail)}`);
+    if (avail === 0n) {
+      console.log(`   ⚠️ No liquidity available, skipping ${poolKey}`);
+      return;
+    }
+  } catch {}
+
+  // Prepare collateral
+  let collateralAmount;
+
+  if (config.collateral === WETH) {
+    // For UNI-WETH short: use WETH as collateral
+    collateralAmount = amountETHForCollateral;
+
+    // Wrap ETH → WETH if needed
+    const wethContract = new ethers.Contract(WETH, WETH_ABI, wallet);
+    const wethBal = await wethContract.balanceOf(wallet.address);
+    const totalNeeded = collateralAmount * BigInt(repeat);
+
+    if (wethBal < totalNeeded) {
+      const toWrap = totalNeeded - wethBal + ETH("0.0001"); // extra buffer
+      console.log(`   💱 Wrapping ${fmtETH(toWrap)} ETH → WETH...`);
+      const wtx = await wethContract.deposit({ value: toWrap });
+      await waitTx(wtx, "Wrap ETH→WETH");
+    }
+
+    // Approve WETH to manager
+    await ensureApproval(WETH, managerAddr, totalNeeded, `WETH→${poolKey} manager`);
+  } else {
+    // For USDC-WETH and WETH-DAI shorts: need to get the counter token first
+    // Swap ETH → collateral token
+    const path = [WETH, config.collateral];
+
+    // Swap enough ETH for all repeats
+    const totalETHForSwap = amountETHForCollateral * BigInt(repeat);
+    console.log(`   💱 Swapping ${fmtETH(totalETHForSwap)} ETH → ${config.symbol} for collateral...`);
+
+    try {
+      const swapTx = await router.swapExactETHForTokens(
+        0n,
+        path,
+        wallet.address,
+        getDeadline(),
+        { value: totalETHForSwap }
+      );
+      await waitTx(swapTx, `Swap ETH→${config.symbol} for shorts`);
+    } catch (err) {
+      console.error(`   ❌ Failed to get ${config.symbol}:`, err.shortMessage || err.message);
+      return;
+    }
+
+    // Get the balance and divide by repeat
+    const balance = await getTokenBalance(config.collateral);
+    collateralAmount = balance / BigInt(repeat);
+
+    if (collateralAmount === 0n) {
+      console.error(`   ❌ No ${config.symbol} balance after swap, skipping`);
+      return;
+    }
+
+    console.log(`   Collateral per position: ${ethers.formatUnits(collateralAmount, config.decimals)} ${config.symbol}`);
+
+    // Approve collateral to manager
+    await ensureApproval(config.collateral, managerAddr, balance, `${config.symbol}→${poolKey} manager`);
   }
 
-  // Approve WETH to pool
-  await ensureApproval(WETH, poolAddr, totalWETHNeeded, `WETH→${poolKey} pool`);
-
-  const pool = new ethers.Contract(poolAddr, POOL_ABI, wallet);
-
+  // Open positions
   for (let i = 1; i <= repeat; i++) {
     try {
-      // openPosition(isLong, collateralToken, collateralAmount, borrowAmount, leverageX10, amountOutMin, deadline)
-      // isLong = false (short)
-      // collateralToken = WETH
-      // borrowAmount = 0 (auto-calculated from leverage)
-      // leverageX10 = 20 (2x leverage — safe default for testnet)
-      const tx = await pool.openPosition(
-        false, // isLong = false (SHORT)
-        WETH,
-        collateralETH,
-        0n, // borrowAmount (0 = auto)
-        20n, // leverageX10 = 2x
-        0n, // amountOutMin
-        deadline(),
-        { gasLimit: 800000n }
+      const tx = await manager.openPosition(
+        false,              // isLong = false (SHORT)
+        config.collateral,  // collateralToken
+        collateralAmount,   // collateralAmount
+        0n,                 // borrowAmount (0 = auto-calc from leverage)
+        20n,                // leverageX10 = 2x leverage
+        0n,                 // amountOutMin (accept any for testnet)
+        getDeadline(),
+        { gasLimit: 1000000n }
       );
       await waitTx(tx, `Short #${i} on ${poolKey}`);
     } catch (err) {
       console.error(`   ❌ Short #${i} on ${poolKey} failed:`, err.shortMessage || err.message);
+
+      // If borrowAmount=0 fails, try with calculated amount
+      if (i === 1) {
+        console.log(`   🔄 Retrying with explicit borrowAmount...`);
+        try {
+          // borrowAmount = collateralAmount (for 2x leverage)
+          const tx = await manager.openPosition(
+            false,
+            config.collateral,
+            collateralAmount,
+            collateralAmount,  // borrow same as collateral for 2x
+            20n,
+            0n,
+            getDeadline(),
+            { gasLimit: 1000000n }
+          );
+          await waitTx(tx, `Short #${i} on ${poolKey} (retry)`);
+          // If retry works, continue with borrowAmount for remaining
+          for (let j = i + 1; j <= repeat; j++) {
+            try {
+              const tx2 = await manager.openPosition(
+                false,
+                config.collateral,
+                collateralAmount,
+                collateralAmount,
+                20n,
+                0n,
+                getDeadline(),
+                { gasLimit: 1000000n }
+              );
+              await waitTx(tx2, `Short #${j} on ${poolKey}`);
+            } catch (err2) {
+              console.error(`   ❌ Short #${j} on ${poolKey} failed:`, err2.shortMessage || err2.message);
+            }
+            await sleep(3000);
+          }
+          break; // Exit the outer loop since we handled remaining inside
+        } catch (err2) {
+          console.error(`   ❌ Retry also failed:`, err2.shortMessage || err2.message);
+        }
+      }
     }
-    if (i < repeat) await sleep(2000);
+    if (i < repeat) await sleep(3000);
   }
 }
 
@@ -199,37 +307,39 @@ async function openShort(poolKey, collateralETH, repeat) {
 // STEP 3: ADD LIQUIDITY
 // ═══════════════════════════════════════════
 async function addLiquidityETHPair(poolKey, tokenAddr, tokenSymbol, amountETH, repeat) {
-  console.log(
-    `\n💧 ADD LIQUIDITY: ${fmtETH(amountETH)} ETH to ${poolKey} (${repeat}x)`
-  );
+  console.log(`\n💧 ADD LIQUIDITY: ${fmtETH(amountETH)} ETH to ${poolKey} (${repeat}x)`);
 
   // Get expected token amount from router
   const path = [WETH, tokenAddr];
-  let expectedTokenOut;
+  let expectedTokenOut = 0n;
   try {
     const amounts = await router.getAmountsOut(amountETH, path);
     expectedTokenOut = amounts[1];
+    console.log(`   Expected token amount: ${ethers.formatUnits(expectedTokenOut, tokenAddr === USDC ? 6 : 18)} ${tokenSymbol}`);
   } catch {
-    console.log("   ⚠️ Could not estimate token amount, using 0 as min");
-    expectedTokenOut = 0n;
+    console.log("   ⚠️ Could not estimate, will swap first");
   }
 
-  // Check if we have enough tokens, if not swap some
+  // Make sure we have enough tokens
   const token = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
   const tokenBal = await token.balanceOf(wallet.address);
-  const totalTokenNeeded = expectedTokenOut * BigInt(repeat);
+  const totalTokenNeeded = expectedTokenOut > 0n ? expectedTokenOut * BigInt(repeat + 1) : 0n;
 
-  if (tokenBal < totalTokenNeeded && expectedTokenOut > 0n) {
-    console.log(`   💱 Need more ${tokenSymbol}, swapping...`);
+  if (tokenBal < totalTokenNeeded) {
+    console.log(`   💱 Swapping ETH → ${tokenSymbol} for liquidity...`);
     const swapTx = await router.swapExactETHForTokens(
       0n,
       path,
       wallet.address,
-      deadline(),
-      { value: amountETH * BigInt(repeat) }
+      getDeadline(),
+      { value: amountETH * BigInt(repeat + 2) } // extra buffer
     );
-    await waitTx(swapTx, `Pre-swap ETH→${tokenSymbol} for liquidity`);
+    await waitTx(swapTx, `Pre-swap ETH→${tokenSymbol}`);
   }
+
+  // Refresh token balance and recalculate per-position amount
+  const newBal = await token.balanceOf(wallet.address);
+  const tokenPerPosition = expectedTokenOut > 0n ? expectedTokenOut : newBal / BigInt(repeat + 1);
 
   // Approve token to router
   await ensureApproval(tokenAddr, ROUTER, MAX_UINT, `${tokenSymbol}→Router`);
@@ -238,91 +348,72 @@ async function addLiquidityETHPair(poolKey, tokenAddr, tokenSymbol, amountETH, r
     try {
       const tx = await router.addLiquidityETH(
         tokenAddr,
-        expectedTokenOut > 0n ? expectedTokenOut : 1n,
+        tokenPerPosition,
         0n, // amountTokenMin
         0n, // amountETHMin
         wallet.address,
-        deadline(),
+        getDeadline(),
         { value: amountETH, gasLimit: 500000n }
       );
       await waitTx(tx, `AddLiq #${i} to ${poolKey}`);
     } catch (err) {
       console.error(`   ❌ AddLiq #${i} to ${poolKey} failed:`, err.shortMessage || err.message);
     }
-    if (i < repeat) await sleep(2000);
+    if (i < repeat) await sleep(3000);
   }
 }
 
-async function addLiquidityTokenPair(poolKey, tokenA, tokenASymbol, decA, tokenB, tokenBSymbol, decB, amountAHuman, repeat) {
+async function addLiquidityTokenPair(poolKey, tokenA, symA, decA, tokenB, symB, decB, amountAHuman, repeat) {
   const amountA = ethers.parseUnits(amountAHuman.toString(), decA);
-  console.log(
-    `\n💧 ADD LIQUIDITY: ${amountAHuman} ${tokenASymbol} to ${poolKey} (${repeat}x)`
-  );
+  console.log(`\n💧 ADD LIQUIDITY: ${amountAHuman} ${symA} to ${poolKey} (${repeat}x)`);
 
   // Estimate amountB needed
-  const path = [tokenA, tokenB];
   let amountBDesired;
   try {
-    const amounts = await router.getAmountsOut(amountA, path);
+    const amounts = await router.getAmountsOut(amountA, [tokenA, tokenB]);
     amountBDesired = amounts[1];
+    console.log(`   Need ~${ethers.formatUnits(amountBDesired, decB)} ${symB} per position`);
   } catch {
-    // Use 1:1 ratio for stablecoins
     amountBDesired = ethers.parseUnits(amountAHuman.toString(), decB);
   }
 
-  // Check balances
-  const tA = new ethers.Contract(tokenA, ERC20_ABI, wallet);
-  const tB = new ethers.Contract(tokenB, ERC20_ABI, wallet);
-  const balA = await tA.balanceOf(wallet.address);
-  const balB = await tB.balanceOf(wallet.address);
+  // Check and acquire tokens
+  const totalANeeded = amountA * BigInt(repeat);
+  const totalBNeeded = amountBDesired * BigInt(repeat);
 
-  if (balA < amountA * BigInt(repeat)) {
-    console.log(`   ⚠️ Not enough ${tokenASymbol}. Balance: ${ethers.formatUnits(balA, decA)}. Need: ${ethers.formatUnits(amountA * BigInt(repeat), decA)}`);
-    console.log(`   💱 Swapping ETH for ${tokenASymbol}...`);
-    const swapTx = await router.swapExactETHForTokens(
-      0n,
-      [WETH, tokenA],
-      wallet.address,
-      deadline(),
-      { value: ETH("0.005") }
-    );
-    await waitTx(swapTx, `Pre-swap ETH→${tokenASymbol}`);
+  let balA = await getTokenBalance(tokenA);
+  if (balA < totalANeeded) {
+    console.log(`   💱 Need more ${symA}, swapping ETH...`);
+    const tx = await router.swapExactETHForTokens(0n, [WETH, tokenA], wallet.address, getDeadline(), { value: ETH("0.005") });
+    await waitTx(tx, `Pre-swap ETH→${symA}`);
   }
 
-  if (balB < amountBDesired * BigInt(repeat)) {
-    console.log(`   💱 Swapping ETH for ${tokenBSymbol}...`);
-    const swapTx = await router.swapExactETHForTokens(
-      0n,
-      [WETH, tokenB],
-      wallet.address,
-      deadline(),
-      { value: ETH("0.005") }
-    );
-    await waitTx(swapTx, `Pre-swap ETH→${tokenBSymbol}`);
+  let balB = await getTokenBalance(tokenB);
+  if (balB < totalBNeeded) {
+    console.log(`   💱 Need more ${symB}, swapping ETH...`);
+    const tx = await router.swapExactETHForTokens(0n, [WETH, tokenB], wallet.address, getDeadline(), { value: ETH("0.005") });
+    await waitTx(tx, `Pre-swap ETH→${symB}`);
   }
 
-  // Approve both tokens to router
-  await ensureApproval(tokenA, ROUTER, MAX_UINT, `${tokenASymbol}→Router`);
-  await ensureApproval(tokenB, ROUTER, MAX_UINT, `${tokenBSymbol}→Router`);
+  // Approve both to router
+  await ensureApproval(tokenA, ROUTER, MAX_UINT, `${symA}→Router`);
+  await ensureApproval(tokenB, ROUTER, MAX_UINT, `${symB}→Router`);
 
   for (let i = 1; i <= repeat; i++) {
     try {
       const tx = await router.addLiquidity(
-        tokenA,
-        tokenB,
-        amountA,
-        amountBDesired,
-        0n, // amountAMin
-        0n, // amountBMin
+        tokenA, tokenB,
+        amountA, amountBDesired,
+        0n, 0n,
         wallet.address,
-        deadline(),
+        getDeadline(),
         { gasLimit: 500000n }
       );
       await waitTx(tx, `AddLiq #${i} to ${poolKey}`);
     } catch (err) {
       console.error(`   ❌ AddLiq #${i} to ${poolKey} failed:`, err.shortMessage || err.message);
     }
-    if (i < repeat) await sleep(2000);
+    if (i < repeat) await sleep(3000);
   }
 }
 
@@ -332,7 +423,6 @@ async function addLiquidityTokenPair(poolKey, tokenA, tokenASymbol, decA, tokenB
 async function closeAllPositions() {
   console.log("\n🔴 CLOSING ALL POSITIONS...");
 
-  // Query subgraph for open positions
   const query = `{
     positions(
       where: { user: "${wallet.address.toLowerCase()}", status_in: ["OPEN", "PARTIAL"] }
@@ -360,7 +450,7 @@ async function closeAllPositions() {
     const data = await resp.json();
     positions = data?.data?.positions || [];
   } catch (err) {
-    console.error("   ❌ Failed to fetch positions from subgraph:", err.message);
+    console.error("   ❌ Failed to fetch positions:", err.message);
     return;
   }
 
@@ -375,46 +465,32 @@ async function closeAllPositions() {
     const poolAddr = pos.pool.address;
     const posId = BigInt(pos.positionIndex);
 
-    // Get the manager address for this pool
+    // Get manager for this pool
     let managerAddr;
     try {
       managerAddr = await factory.getManager(poolAddr);
     } catch {
-      managerAddr = poolAddr; // fallback to pool address
+      managerAddr = null;
     }
 
-    // Use pool address for close (matching frontend behavior for closePosition on nlp)
-    const target = managerAddr && managerAddr !== ethers.ZeroAddress ? managerAddr : poolAddr;
-    const contract = new ethers.Contract(target, POOL_ABI, wallet);
+    // closePosition is called on the MANAGER
+    const targetAddr = managerAddr && managerAddr !== ethers.ZeroAddress ? managerAddr : poolAddr;
+    const contract = new ethers.Contract(targetAddr, MANAGER_ABI, wallet);
 
-    console.log(
-      `   📌 Closing position #${posId} (${pos.isLong ? "LONG" : "SHORT"} ${pos.collateralToken.symbol}) on pool ${poolAddr.slice(0, 10)}...`
-    );
+    console.log(`   📌 Closing #${posId} (${pos.isLong ? "LONG" : "SHORT"} ${pos.collateralToken.symbol}) on ${poolAddr.slice(0, 10)}...`);
 
     try {
       const tx = await contract.closePosition(
         posId,
-        0n, // amountOutMin (accept any for testnet)
-        deadline(),
-        { gasLimit: 800000n }
+        0n, // amountOutMin
+        getDeadline(),
+        { gasLimit: 1000000n }
       );
       await waitTx(tx, `Close position #${posId}`);
     } catch (err) {
-      console.error(`   ❌ Close position #${posId} failed:`, err.shortMessage || err.message);
-      
-      // Retry with pool address if manager failed
-      if (target !== poolAddr) {
-        console.log(`   🔄 Retrying with pool address...`);
-        try {
-          const poolContract = new ethers.Contract(poolAddr, POOL_ABI, wallet);
-          const tx = await poolContract.closePosition(posId, 0n, deadline(), { gasLimit: 800000n });
-          await waitTx(tx, `Close position #${posId} (retry)`);
-        } catch (err2) {
-          console.error(`   ❌ Retry also failed:`, err2.shortMessage || err2.message);
-        }
-      }
+      console.error(`   ❌ Close #${posId} failed:`, err.shortMessage || err.message);
     }
-    await sleep(2000);
+    await sleep(3000);
   }
 }
 
@@ -423,7 +499,7 @@ async function closeAllPositions() {
 // ═══════════════════════════════════════════
 async function main() {
   console.log("═══════════════════════════════════════════");
-  console.log("  🏴 NEMESIS.TRADE TESTNET BOT");
+  console.log("  🏴 NEMESIS.TRADE TESTNET BOT v2");
   console.log("  Chain: ETH Sepolia (11155111)");
   console.log("═══════════════════════════════════════════");
 
@@ -436,12 +512,15 @@ async function main() {
   console.log(`\n👛 Wallet: ${wallet.address}`);
   console.log(`💰 Balance: ${fmtETH(balance)} ETH`);
 
-  const minRequired = ETH("0.02"); // rough estimate for all operations + gas
+  // Check token balances
+  for (const [sym, addr, dec] of [["USDC", USDC, 6], ["DAI", DAI, 18], ["UNI", UNI, 18]]) {
+    const bal = await getTokenBalance(addr);
+    if (bal > 0n) console.log(`   ${sym}: ${ethers.formatUnits(bal, dec)}`);
+  }
+
+  const minRequired = ETH("0.015");
   if (balance < minRequired) {
-    console.error(
-      `\n❌ Insufficient ETH balance. Need at least ~0.02 ETH for all operations + gas.`
-    );
-    console.error(`   Get Sepolia ETH from: https://www.alchemy.com/faucets/ethereum-sepolia`);
+    console.error(`\n❌ Need at least ~0.015 ETH. Get from: https://www.alchemy.com/faucets/ethereum-sepolia`);
     process.exit(1);
   }
 
@@ -450,7 +529,7 @@ async function main() {
 
   // ── STEP 1: SWAPS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  STEP 1/4: SWAPS");
+  console.log("  📊 STEP 1/4: SWAPS (15 transactions)");
   console.log("════════════════════════════════════════");
 
   await swapETHForToken(USDC, "USDC", AMOUNT_ETH, REPEAT);
@@ -459,7 +538,7 @@ async function main() {
 
   // ── STEP 2: OPEN SHORT POSITIONS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  STEP 2/4: OPEN SHORT POSITIONS");
+  console.log("  📉 STEP 2/4: OPEN SHORT (15 positions)");
   console.log("════════════════════════════════════════");
 
   await openShort("USDC-WETH", AMOUNT_ETH, REPEAT);
@@ -468,39 +547,31 @@ async function main() {
 
   // ── STEP 3: ADD LIQUIDITY ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  STEP 3/4: ADD LIQUIDITY");
+  console.log("  💧 STEP 3/4: ADD LIQUIDITY");
   console.log("════════════════════════════════════════");
 
-  // ETH-USDC: 0.0002 ETH × 5
-  // Pool is USDC(token0)-WETH(token1), so use addLiquidityETH with USDC as token
   await addLiquidityETHPair("USDC-WETH", USDC, "USDC", AMOUNT_ETH, REPEAT);
-
-  // ETH-DAI: 0.0002 ETH × 5
-  // Pool is WETH(token0)-DAI(token1)
   await addLiquidityETHPair("WETH-DAI", DAI, "DAI", AMOUNT_ETH, REPEAT);
-
-  // USDC-DAI: $10 USDC × 5
   await addLiquidityTokenPair("USDC-DAI", USDC, "USDC", 6, DAI, "DAI", 18, "10", REPEAT);
 
   // ── STEP 4: CLOSE ALL POSITIONS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  STEP 4/4: CLOSE ALL POSITIONS");
+  console.log("  🔴 STEP 4/4: CLOSE ALL POSITIONS");
   console.log("════════════════════════════════════════");
 
-  // Wait a bit for subgraph to index
-  console.log("   ⏳ Waiting 30s for subgraph to index positions...");
+  console.log("   ⏳ Waiting 30s for subgraph indexing...");
   await sleep(30000);
 
   await closeAllPositions();
 
   // ── DONE ──
   console.log("\n\n═══════════════════════════════════════════");
-  console.log("  ✅ ALL TASKS COMPLETED!");
+  console.log(`  ✅ COMPLETED! Total transactions: ${txCount}`);
   console.log("═══════════════════════════════════════════");
 
   const finalBalance = await provider.getBalance(wallet.address);
   console.log(`💰 Final balance: ${fmtETH(finalBalance)} ETH`);
-  console.log(`⛽ Gas spent: ${fmtETH(balance - finalBalance)} ETH`);
+  console.log(`⛽ Total gas spent: ~${fmtETH(balance - finalBalance)} ETH`);
 }
 
 main().catch((err) => {

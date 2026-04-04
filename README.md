@@ -1,4 +1,4 @@
-# 🏴 Nemesis.trade Testnet Bot
+# 🏴 Nemesis.trade Testnet Bot v4
 
 Bot otomatis untuk testnet [nemesis.trade](https://nemesis.trade) di jaringan **ETH Sepolia**.
 
@@ -6,17 +6,19 @@ Bot otomatis untuk testnet [nemesis.trade](https://nemesis.trade) di jaringan **
 
 | Step | Action | Detail |
 |------|--------|--------|
-| 1 | **Swap** | 0.0002 ETH → USDC (5x), ETH → DAI (5x), ETH → UNI (5x) |
-| 2 | **Open Short** | 0.0002 ETH collateral: ETH-USDC (5x), ETH-DAI (5x), ETH-UNI (5x) |
-| 3 | **Add Liquidity** | 0.0002 ETH: ETH-USDC (5x), ETH-DAI (5x) + $10 USDC-DAI (5x) |
-| 4 | **Close All Positions** | Tutup semua short positions yang terbuka |
+| 1 | **Swap** | ETH → USDC (5x), ETH → DAI (5x), ETH → UNI (5x), ETH → Test2 (5x), ETH → Test3 (5x) |
+| 2 | **Open Short** | ETH-USDC (5x), ETH-DAI (5x), ETH-UNI (5x), ETH-Test2 (5x) |
+| 3 | **Open Long** | ETH-USDC (5x), ETH-DAI (5x), ETH-UNI (5x), ETH-Test3 (5x) |
+| 4 | **Add Liquidity** | ETH-USDC (5x), ETH-DAI (5x), USDC-DAI (5x), ETH-Test2 (5x), ETH-Test3 (5x) |
+| 5 | **Remove Liquidity** | UNI-WETH, WETH-DAI, USDC-DAI |
+| 6 | **Close All Positions** | Tutup semua short & long positions |
 
-**Total: 60 transaksi** (15 swap + 15 short + 15 add liq + close positions)
+**Total: ~90+ transaksi**
 
 ## Requirements
 
 - **Node.js** v18+
-- **Sepolia ETH** minimal ~0.02 ETH (untuk gas + operasi)
+- **Sepolia ETH** minimal ~0.04 ETH (untuk gas + operasi)
 - **Private key** wallet kamu
 
 ## Setup
@@ -36,22 +38,15 @@ nano .env   # masukkan PRIVATE_KEY kamu
 node bot.js
 ```
 
-## Dapatkan Sepolia ETH
+## Tokens
 
-- https://www.alchemy.com/faucets/ethereum-sepolia
-- https://cloud.google.com/application/web3/faucet/ethereum/sepolia
-- https://sepolia-faucet.pk910.de/ (PoW faucet)
-
-## Contracts yang digunakan
-
-| Contract | Address |
-|----------|---------|
-| Router | `0xa1f78bed...cace4a8` |
-| Factory | `0xbf301098...9653ae50` |
-| WETH | `0x7b79995e...098E7f9` |
+| Token | Address |
+|-------|---------|
 | USDC | `0x10279e63...E61464C` |
 | DAI | `0xd67215fd...8871fcb` |
 | UNI | `0x7438ea86...b046663` |
+| Test2 | `0xbce723dc...f91d80c` |
+| Test3 | `0x12a830ae...f7567c` |
 
 ## ⚠️ Catatan
 

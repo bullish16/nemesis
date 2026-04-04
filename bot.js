@@ -22,6 +22,8 @@ const WETH = "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9";
 const USDC = "0x10279e6333f9d0ee103f4715b8aaea75be61464c";
 const DAI = "0xd67215fd6c0890493f34af3c5e4231ce98871fcb";
 const UNI = "0x7438ea86a89b7d53af5264fb3abae1172b046663";
+const TEST2 = "0xbce723dc31a53ea268223220ffabf0bb2f91d80c";
+const TEST3 = "0x12a830aed198ef536826512d0fd9ccea98f7567c";
 
 // ── Pool Addresses (from subgraph) ──
 const POOLS = {
@@ -29,6 +31,8 @@ const POOLS = {
   "WETH-DAI": "0x0b6a0a69b7040b2281730cbae6060b3b1b2ed3a9",  // token0=WETH, token1=DAI
   "UNI-WETH": "0x84605fffe96a1961a144e695247029eb3a60c316",  // token0=UNI,  token1=WETH
   "USDC-DAI": "0x337c9fecf78aad05f6ab742609bede3a4f3483cf",  // token0=USDC, token1=DAI
+  "WETH-TEST2": "0x9308f73b39dc0041c3353e795fb37ae2251bb94f", // token0=WETH, token1=Test2
+  "TEST3-WETH": "0xa4089e7c8b11ddc11d69784689e12f13aa5d7e58", // token0=Test3, token1=WETH
 };
 
 // ── Manager/Vault Addresses (from factory.getManager) ──
@@ -38,6 +42,8 @@ const MANAGERS = {
   "WETH-DAI": "0xF467EC26cf1911A0Ff87E3A6D36b3aeC915506a9",
   "UNI-WETH": "0xAF93c5b321757Ca9f37992525c4889Bceef76726",
   "USDC-DAI": "0x6c1581bd9eddec33c8e30e9f1c3d82def2716154",
+  "WETH-TEST2": "0x95B53f890F5Cb8c12F95Fc9eA19AE85Ca43eAb55",
+  "TEST3-WETH": "0x587a210F9355f04a485f5633e66bF295E2FAaf83",
 };
 
 // ── Short Position Config ──
@@ -45,10 +51,14 @@ const MANAGERS = {
 // USDC-WETH pool: short WETH → collateral = USDC (token0)
 // WETH-DAI pool:  short WETH → collateral = DAI  (token1)
 // UNI-WETH pool:  short UNI  → collateral = WETH (token1)
+// WETH-TEST2 pool: short TEST2 → collateral = WETH (token0)
+// TEST3-WETH pool: short WETH  → collateral = TEST3 (token0)
 const SHORT_CONFIG = {
   "USDC-WETH": { collateral: USDC, symbol: "USDC", decimals: 6 },
   "WETH-DAI": { collateral: DAI, symbol: "DAI", decimals: 18 },
   "UNI-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
+  "WETH-TEST2": { collateral: WETH, symbol: "WETH", decimals: 18 },
+  "TEST3-WETH": { collateral: TEST3, symbol: "Test3", decimals: 18 },
 };
 
 // ── Long Position Config ──
@@ -56,10 +66,14 @@ const SHORT_CONFIG = {
 // USDC-WETH pool: long WETH → collateral = WETH (token1)
 // WETH-DAI pool:  long WETH → collateral = WETH (token0)
 // UNI-WETH pool:  long ETH  → collateral = WETH (token1)
+// WETH-TEST2 pool: long TEST2 → collateral = TEST2 (token1)
+// TEST3-WETH pool: long WETH  → collateral = WETH (token1)
 const LONG_CONFIG = {
   "USDC-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
   "WETH-DAI": { collateral: WETH, symbol: "WETH", decimals: 18 },
   "UNI-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
+  "WETH-TEST2": { collateral: TEST2, symbol: "Test2", decimals: 18 },
+  "TEST3-WETH": { collateral: WETH, symbol: "WETH", decimals: 18 },
 };
 
 // ── Subgraph ──
@@ -648,7 +662,7 @@ async function closeAllPositions() {
 // ═══════════════════════════════════════════
 async function main() {
   console.log("═══════════════════════════════════════════");
-  console.log("  🏴 NEMESIS.TRADE TESTNET BOT v3");
+  console.log("  🏴 NEMESIS.TRADE TESTNET BOT v4");
   console.log("  Chain: ETH Sepolia (11155111)");
   console.log("═══════════════════════════════════════════");
 
@@ -662,14 +676,14 @@ async function main() {
   console.log(`💰 Balance: ${fmtETH(balance)} ETH`);
 
   // Check token balances
-  for (const [sym, addr, dec] of [["USDC", USDC, 6], ["DAI", DAI, 18], ["UNI", UNI, 18]]) {
+  for (const [sym, addr, dec] of [["USDC", USDC, 6], ["DAI", DAI, 18], ["UNI", UNI, 18], ["Test2", TEST2, 18], ["Test3", TEST3, 18]]) {
     const bal = await getTokenBalance(addr);
     if (bal > 0n) console.log(`   ${sym}: ${ethers.formatUnits(bal, dec)}`);
   }
 
-  const minRequired = ETH("0.025");
+  const minRequired = ETH("0.04");
   if (balance < minRequired) {
-    console.error(`\n❌ Need at least ~0.025 ETH. Get from: https://www.alchemy.com/faucets/ethereum-sepolia`);
+    console.error(`\n❌ Need at least ~0.04 ETH. Get from: https://www.alchemy.com/faucets/ethereum-sepolia`);
     process.exit(1);
   }
 
@@ -677,30 +691,34 @@ async function main() {
 
   // ── STEP 1: SWAPS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  📊 STEP 1/6: SWAPS (15 transactions)");
+  console.log("  📊 STEP 1/6: SWAPS (25 transactions)");
   console.log("════════════════════════════════════════");
 
   await swapETHForToken(USDC, "USDC", REPEAT);
   await swapETHForToken(DAI, "DAI", REPEAT);
   await swapETHForToken(UNI, "UNI", REPEAT);
+  await swapETHForToken(TEST2, "Test2", REPEAT);
+  await swapETHForToken(TEST3, "Test3", REPEAT);
 
   // ── STEP 2: OPEN SHORT POSITIONS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  📉 STEP 2/6: OPEN SHORT (15 positions)");
+  console.log("  📉 STEP 2/6: OPEN SHORT (20 positions)");
   console.log("════════════════════════════════════════");
 
   await openShort("USDC-WETH", REPEAT);
   await openShort("WETH-DAI", REPEAT);
   await openShort("UNI-WETH", REPEAT);
+  await openShort("WETH-TEST2", REPEAT);
 
   // ── STEP 3: OPEN LONG POSITIONS ──
   console.log("\n\n════════════════════════════════════════");
-  console.log("  📈 STEP 3/6: OPEN LONG (15 positions)");
+  console.log("  📈 STEP 3/6: OPEN LONG (20 positions)");
   console.log("════════════════════════════════════════");
 
   await openLong("USDC-WETH", REPEAT);
   await openLong("WETH-DAI", REPEAT);
   await openLong("UNI-WETH", REPEAT);
+  await openLong("TEST3-WETH", REPEAT);
 
   // ── STEP 4: ADD LIQUIDITY ──
   console.log("\n\n════════════════════════════════════════");
@@ -710,6 +728,8 @@ async function main() {
   await addLiquidityETHPair("USDC-WETH", USDC, "USDC", REPEAT);
   await addLiquidityETHPair("WETH-DAI", DAI, "DAI", REPEAT);
   await addLiquidityTokenPair("USDC-DAI", USDC, "USDC", 6, DAI, "DAI", 18, "10", REPEAT);
+  await addLiquidityETHPair("WETH-TEST2", TEST2, "Test2", REPEAT);
+  await addLiquidityETHPair("TEST3-WETH", TEST3, "Test3", REPEAT);
 
   // ── STEP 5: REMOVE LIQUIDITY ──
   console.log("\n\n════════════════════════════════════════");
